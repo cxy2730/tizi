@@ -529,30 +529,55 @@ print_client_info() {
     echo -e "${CYAN}协议:${RESET}       hysteria2"
     echo ""
 
-    # 生成分享链接 (IPv4)
+    # 构建 Shadowrocket 兼容参数
+    if [[ "$TLS_MODE" == "2" ]]; then
+        # 自签证书: insecure=1, 无 sni
+        PARAMS_V4="insecure=1&alpn=h3"
+        PARAMS_V6="insecure=1&alpn=h3"
+    elif [[ "$TLS_MODE" == "1" ]]; then
+        # ACME: sni=域名
+        PARAMS_V4="sni=${SERVER_ADDR}&alpn=h3&peer=${SERVER_ADDR}"
+        PARAMS_V6="sni=${SERVER_ADDR}&alpn=h3&peer=${SERVER_ADDR}"
+    else
+        # 自定义证书
+        PARAMS_V4="alpn=h3"
+        PARAMS_V6="alpn=h3"
+    fi
+
+    # 生成分享链接 (IPv4) - 兼容 Shadowrocket
     if [[ -n "$IPV4" ]]; then
-        if [[ "$TLS_MODE" == "2" ]]; then
-            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${IPV4}:${PORT}?insecure=1#Hysteria2-IPv4"
+        if [[ "$TLS_MODE" == "1" ]]; then
+            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}?${PARAMS_V4}#Hysteria2-IPv4"
         else
-            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}#Hysteria2-IPv4"
+            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${IPV4}:${PORT}?${PARAMS_V4}#Hysteria2-IPv4"
         fi
         echo -e "${CYAN}分享链接 (IPv4):${RESET}"
         echo -e "${YELLOW}$SHARE_LINK_V4${RESET}"
     fi
 
-    # 生成分享链接 (IPv6)
+    # 生成分享链接 (IPv6) - 兼容 Shadowrocket
     if [[ -n "$IPV6" ]]; then
-        if [[ "$TLS_MODE" == "2" ]]; then
-            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}?insecure=1#Hysteria2-IPv6"
-        elif [[ "$TLS_MODE" == "1" ]]; then
-            # ACME 模式下使用域名 (证书绑定域名, 不能用原始 IP)
-            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}#Hysteria2-IPv6"
+        if [[ "$TLS_MODE" == "1" ]]; then
+            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}?${PARAMS_V6}#Hysteria2-IPv6"
         else
-            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}#Hysteria2-IPv6"
+            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}?${PARAMS_V6}#Hysteria2-IPv6"
         fi
         echo -e "${CYAN}分享链接 (IPv6):${RESET}"
         echo -e "${YELLOW}$SHARE_LINK_V6${RESET}"
     fi
+
+    # 生成 Base64 订阅内容 (Shadowrocket 小火箭可直接导入)
+    echo ""
+    echo -e "${GREEN}--- Shadowrocket (小火箭) 订阅 ---${RESET}"
+    SUB_CONTENT=""
+    [[ -n "$SHARE_LINK_V4" ]] && SUB_CONTENT+="${SHARE_LINK_V4}"$'\n'
+    [[ -n "$SHARE_LINK_V6" ]] && SUB_CONTENT+="${SHARE_LINK_V6}"$'\n'
+    if [[ -n "$SUB_CONTENT" ]]; then
+        SUB_BASE64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
+        echo -e "${CYAN}Base64 订阅内容 (复制到小火箭订阅):${RESET}"
+        echo -e "${YELLOW}$SUB_BASE64${RESET}"
+    fi
+
     echo ""
     echo -e "${GREEN}--- 中国优化已启用 ---${RESET}"
     echo -e "${CYAN}QUIC:${RESET}       收发窗口 16/32MB, 保活 10s"
@@ -560,7 +585,9 @@ print_client_info() {
     echo -e "${CYAN}伪装:${RESET}       $MASQ_URL"
     echo ""
     echo -e "${CYAN}客户端建议 (面向中国):${RESET}"
-    echo "  - 推荐使用 sing-box 或 Clash.Meta 客户端"
+    echo "  - iOS: Shadowrocket (小火箭) - 直接复制分享链接导入"
+    echo "  - Android: sing-box / Clash Meta"
+    echo "  - PC: Clash Verge / v2rayN"
     echo "  - 客户端可设置 bandwidth 上下行以启用 Brutal 模式加速"
     echo "  - 如遇连接不稳定, 可尝试更换端口 (443/8443/80)"
     echo ""
@@ -570,6 +597,134 @@ print_client_info() {
     echo "  查看日志: journalctl --no-pager -e -u hysteria-server.service"
     echo "  编辑配置: nano /etc/hysteria/config.yaml"
     echo "  卸载:     bash <(curl -fsSL https://get.hy2.sh/) --remove"
+    echo ""
+}
+
+# ============== 查看订阅链接 ==============
+show_subscription() {
+    CONFIG_FILE="/etc/hysteria/config.yaml"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        error "未找到配置文件 $CONFIG_FILE, 请先安装 Hysteria 2"
+    fi
+
+    info "读取现有配置..."
+
+    # 从配置文件提取信息
+    SUB_PORT=$(grep -E '^listen:' "$CONFIG_FILE" | sed 's/listen:\s*//' | grep -oE '[0-9]+' | tail -1)
+    SUB_PWD=$(grep -E '^\s+password:' "$CONFIG_FILE" | sed 's/.*password:\s*//' | head -1)
+    SUB_MASQ=$(grep -E '^\s+url:' "$CONFIG_FILE" | sed 's/.*url:\s*//' | head -1)
+
+    if [[ -z "$SUB_PORT" || -z "$SUB_PWD" ]]; then
+        error "无法从配置文件中解析端口或密码"
+    fi
+
+    # 判断 TLS 模式
+    if grep -q '^acme:' "$CONFIG_FILE"; then
+        SUB_TLS="acme"
+        SUB_DOMAIN=$(grep -A2 'domains:' "$CONFIG_FILE" | grep -E '^\s+-' | sed 's/.*-\s*//' | head -1)
+    elif grep -q 'cert:.*certs/cert.pem' "$CONFIG_FILE"; then
+        SUB_TLS="selfsigned"
+    else
+        SUB_TLS="custom"
+    fi
+
+    # 检测当前 IP
+    info "检测 VPS IP 地址..."
+    SUB_V4=$(curl -s4 --max-time 5 ip.sb 2>/dev/null || true)
+    if [[ -z "$SUB_V4" ]]; then
+        SUB_V4=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || true)
+    fi
+    SUB_V6=$(curl -s6 --max-time 5 ip.sb 2>/dev/null || true)
+    if [[ -z "$SUB_V6" ]]; then
+        SUB_V6=$(curl -s6 --max-time 5 ifconfig.me 2>/dev/null || true)
+    fi
+
+    # 显示信息
+    echo ""
+    echo -e "${GREEN}============================================${RESET}"
+    echo -e "${GREEN}  Hysteria 2 订阅信息${RESET}"
+    echo -e "${GREEN}============================================${RESET}"
+    echo ""
+    if [[ -n "$SUB_V4" ]]; then
+        echo -e "${CYAN}IPv4:${RESET}       $SUB_V4"
+    fi
+    if [[ -n "$SUB_V6" ]]; then
+        echo -e "${CYAN}IPv6:${RESET}       $SUB_V6"
+    fi
+    if [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+        echo -e "${CYAN}域名:${RESET}       $SUB_DOMAIN"
+    fi
+    echo -e "${CYAN}端口:${RESET}       $SUB_PORT"
+    echo -e "${CYAN}密码:${RESET}       $SUB_PWD"
+    echo -e "${CYAN}协议:${RESET}       hysteria2"
+    echo -e "${CYAN}伪装:${RESET}       ${SUB_MASQ:-无}"
+    echo ""
+
+    # 构建 Shadowrocket 兼容参数
+    if [[ "$SUB_TLS" == "selfsigned" ]]; then
+        SUB_PARAMS="insecure=1&alpn=h3"
+    elif [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+        SUB_PARAMS="sni=${SUB_DOMAIN}&alpn=h3&peer=${SUB_DOMAIN}"
+    else
+        SUB_PARAMS="alpn=h3"
+    fi
+
+    LINK_V4=""
+    LINK_V6=""
+
+    # 生成 IPv4 分享链接 - 兼容 Shadowrocket
+    if [[ -n "$SUB_V4" ]]; then
+        if [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+            LINK_V4="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv4"
+        else
+            LINK_V4="hysteria2://${SUB_PWD}@${SUB_V4}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv4"
+        fi
+        echo -e "${CYAN}分享链接 (IPv4):${RESET}"
+        echo -e "${YELLOW}$LINK_V4${RESET}"
+        echo ""
+    fi
+
+    # 生成 IPv6 分享链接 - 兼容 Shadowrocket
+    if [[ -n "$SUB_V6" ]]; then
+        if [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+            LINK_V6="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv6"
+        else
+            LINK_V6="hysteria2://${SUB_PWD}@[${SUB_V6}]:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv6"
+        fi
+        echo -e "${CYAN}分享链接 (IPv6):${RESET}"
+        echo -e "${YELLOW}$LINK_V6${RESET}"
+        echo ""
+    fi
+
+    if [[ -z "$SUB_V4" && -z "$SUB_V6" ]]; then
+        warn "未检测到公网 IP, 无法生成分享链接"
+    fi
+
+    # 生成 Base64 订阅内容 (Shadowrocket 小火箭可直接导入)
+    echo -e "${GREEN}--- Shadowrocket (小火箭) 订阅 ---${RESET}"
+    SUB_CONTENT=""
+    [[ -n "$LINK_V4" ]] && SUB_CONTENT+="${LINK_V4}"$'\n'
+    [[ -n "$LINK_V6" ]] && SUB_CONTENT+="${LINK_V6}"$'\n'
+    if [[ -n "$SUB_CONTENT" ]]; then
+        SUB_BASE64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
+        echo -e "${CYAN}Base64 订阅内容 (复制到小火箭订阅):${RESET}"
+        echo -e "${YELLOW}$SUB_BASE64${RESET}"
+        echo ""
+        echo -e "${CYAN}导入方式:${RESET}"
+        echo "  1) 直接复制上方分享链接 → 小火箭首页 + 号 → 粘贴"
+        echo "  2) 或复制 Base64 内容 → 小火箭 → 订阅 → 手动输入"
+    fi
+
+    echo ""
+
+    # 服务状态
+    echo -e "${CYAN}服务状态:${RESET}"
+    if systemctl is-active --quiet hysteria-server.service 2>/dev/null; then
+        echo -e "  ${GREEN}● 运行中${RESET}"
+    else
+        echo -e "  ${RED}● 未运行${RESET}"
+    fi
+    echo -e "${CYAN}Hysteria 版本:${RESET} $(hysteria version 2>/dev/null || echo '未知')"
     echo ""
 }
 
@@ -765,8 +920,9 @@ main() {
     echo "  2) 更新 Hysteria 2 到最新版本"
     echo "  3) 更新系统内核 (BBR 最新版)"
     echo "  4) 同时更新 Hysteria 2 + 内核 BBR"
-    echo "  5) 卸载 Hysteria 2"
-    read -rp "$(echo -e "${CYAN}请选择 [1/2/3/4/5, 默认 1]: ${RESET}")" ACTION
+    echo "  5) 查看订阅链接 (IPv4 + IPv6)"
+    echo "  6) 卸载 Hysteria 2"
+    read -rp "$(echo -e "${CYAN}请选择 [1/2/3/4/5/6, 默认 1]: ${RESET}")" ACTION
     ACTION=${ACTION:-1}
 
     case "$ACTION" in
@@ -792,6 +948,9 @@ main() {
             update_kernel_bbr
             ;;
         5)
+            show_subscription
+            ;;
+        6)
             uninstall_all
             ;;
         *)

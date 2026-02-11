@@ -20,7 +20,7 @@ error() { echo -e "${RED}[ERROR]${RESET} $*"; exit 1; }
 # ============== 前置检查 ==============
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        error "请以 root 用户运行此脚本: sudo bash $0"
+        error "请以 sudo 运行此脚本: sudo bash $0"
     fi
 }
 
@@ -310,7 +310,7 @@ masquerade:
     rewriteHost: true
 EOF
 
-    chmod 600 "$CONFIG_FILE"
+    chmod 777 "$CONFIG_FILE"
     info "配置文件已写入: $CONFIG_FILE"
 }
 
@@ -529,55 +529,29 @@ print_client_info() {
     echo -e "${CYAN}协议:${RESET}       hysteria2"
     echo ""
 
-    # 构建 Shadowrocket 兼容参数
-    if [[ "$TLS_MODE" == "2" ]]; then
-        # 自签证书: insecure=1, 无 sni
-        PARAMS_V4="insecure=1&alpn=h3"
-        PARAMS_V6="insecure=1&alpn=h3"
-    elif [[ "$TLS_MODE" == "1" ]]; then
-        # ACME: sni=域名
-        PARAMS_V4="sni=${SERVER_ADDR}&alpn=h3&peer=${SERVER_ADDR}"
-        PARAMS_V6="sni=${SERVER_ADDR}&alpn=h3&peer=${SERVER_ADDR}"
-    else
-        # 自定义证书
-        PARAMS_V4="alpn=h3"
-        PARAMS_V6="alpn=h3"
-    fi
-
-    # 生成分享链接 (IPv4) - 兼容 Shadowrocket
+    # 生成分享链接 (IPv4)
     if [[ -n "$IPV4" ]]; then
-        if [[ "$TLS_MODE" == "1" ]]; then
-            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}?${PARAMS_V4}#Hysteria2-IPv4"
+        if [[ "$TLS_MODE" == "2" ]]; then
+            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${IPV4}:${PORT}?insecure=1#Hysteria2-IPv4"
         else
-            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${IPV4}:${PORT}?${PARAMS_V4}#Hysteria2-IPv4"
+            SHARE_LINK_V4="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}#Hysteria2-IPv4"
         fi
         echo -e "${CYAN}分享链接 (IPv4):${RESET}"
         echo -e "${YELLOW}$SHARE_LINK_V4${RESET}"
     fi
 
-    # 生成分享链接 (IPv6) - 兼容 Shadowrocket
+    # 生成分享链接 (IPv6)
     if [[ -n "$IPV6" ]]; then
-        if [[ "$TLS_MODE" == "1" ]]; then
-            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}?${PARAMS_V6}#Hysteria2-IPv6"
+        if [[ "$TLS_MODE" == "2" ]]; then
+            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}?insecure=1#Hysteria2-IPv6"
+        elif [[ "$TLS_MODE" == "1" ]]; then
+            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@${SERVER_ADDR}:${PORT}#Hysteria2-IPv6"
         else
-            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}?${PARAMS_V6}#Hysteria2-IPv6"
+            SHARE_LINK_V6="hysteria2://${AUTH_PWD}@[${IPV6}]:${PORT}#Hysteria2-IPv6"
         fi
         echo -e "${CYAN}分享链接 (IPv6):${RESET}"
         echo -e "${YELLOW}$SHARE_LINK_V6${RESET}"
     fi
-
-    # 生成 Base64 订阅内容 (Shadowrocket 小火箭可直接导入)
-    echo ""
-    echo -e "${GREEN}--- Shadowrocket (小火箭) 订阅 ---${RESET}"
-    SUB_CONTENT=""
-    [[ -n "$SHARE_LINK_V4" ]] && SUB_CONTENT+="${SHARE_LINK_V4}"$'\n'
-    [[ -n "$SHARE_LINK_V6" ]] && SUB_CONTENT+="${SHARE_LINK_V6}"$'\n'
-    if [[ -n "$SUB_CONTENT" ]]; then
-        SUB_BASE64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
-        echo -e "${CYAN}Base64 订阅内容 (复制到小火箭订阅):${RESET}"
-        echo -e "${YELLOW}$SUB_BASE64${RESET}"
-    fi
-
     echo ""
     echo -e "${GREEN}--- 中国优化已启用 ---${RESET}"
     echo -e "${CYAN}QUIC:${RESET}       收发窗口 16/32MB, 保活 10s"
@@ -585,9 +559,7 @@ print_client_info() {
     echo -e "${CYAN}伪装:${RESET}       $MASQ_URL"
     echo ""
     echo -e "${CYAN}客户端建议 (面向中国):${RESET}"
-    echo "  - iOS: Shadowrocket (小火箭) - 直接复制分享链接导入"
-    echo "  - Android: sing-box / Clash Meta"
-    echo "  - PC: Clash Verge / v2rayN"
+    echo "  - 推荐使用 sing-box 或 Clash.Meta 客户端"
     echo "  - 客户端可设置 bandwidth 上下行以启用 Brutal 模式加速"
     echo "  - 如遇连接不稳定, 可尝试更换端口 (443/8443/80)"
     echo ""
@@ -660,36 +632,31 @@ show_subscription() {
     echo -e "${CYAN}伪装:${RESET}       ${SUB_MASQ:-无}"
     echo ""
 
-    # 构建 Shadowrocket 兼容参数
-    if [[ "$SUB_TLS" == "selfsigned" ]]; then
-        SUB_PARAMS="insecure=1&alpn=h3"
-    elif [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
-        SUB_PARAMS="sni=${SUB_DOMAIN}&alpn=h3&peer=${SUB_DOMAIN}"
-    else
-        SUB_PARAMS="alpn=h3"
-    fi
-
     LINK_V4=""
     LINK_V6=""
 
-    # 生成 IPv4 分享链接 - 兼容 Shadowrocket
+    # 生成 IPv4 分享链接
     if [[ -n "$SUB_V4" ]]; then
-        if [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
-            LINK_V4="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv4"
+        if [[ "$SUB_TLS" == "selfsigned" ]]; then
+            LINK_V4="hysteria2://${SUB_PWD}@${SUB_V4}:${SUB_PORT}?insecure=1#Hysteria2-IPv4"
+        elif [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+            LINK_V4="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}#Hysteria2-IPv4"
         else
-            LINK_V4="hysteria2://${SUB_PWD}@${SUB_V4}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv4"
+            LINK_V4="hysteria2://${SUB_PWD}@${SUB_V4}:${SUB_PORT}#Hysteria2-IPv4"
         fi
         echo -e "${CYAN}分享链接 (IPv4):${RESET}"
         echo -e "${YELLOW}$LINK_V4${RESET}"
         echo ""
     fi
 
-    # 生成 IPv6 分享链接 - 兼容 Shadowrocket
+    # 生成 IPv6 分享链接
     if [[ -n "$SUB_V6" ]]; then
-        if [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
-            LINK_V6="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv6"
+        if [[ "$SUB_TLS" == "selfsigned" ]]; then
+            LINK_V6="hysteria2://${SUB_PWD}@[${SUB_V6}]:${SUB_PORT}?insecure=1#Hysteria2-IPv6"
+        elif [[ "$SUB_TLS" == "acme" && -n "$SUB_DOMAIN" ]]; then
+            LINK_V6="hysteria2://${SUB_PWD}@${SUB_DOMAIN}:${SUB_PORT}#Hysteria2-IPv6"
         else
-            LINK_V6="hysteria2://${SUB_PWD}@[${SUB_V6}]:${SUB_PORT}?${SUB_PARAMS}#Hysteria2-IPv6"
+            LINK_V6="hysteria2://${SUB_PWD}@[${SUB_V6}]:${SUB_PORT}#Hysteria2-IPv6"
         fi
         echo -e "${CYAN}分享链接 (IPv6):${RESET}"
         echo -e "${YELLOW}$LINK_V6${RESET}"
@@ -698,21 +665,6 @@ show_subscription() {
 
     if [[ -z "$SUB_V4" && -z "$SUB_V6" ]]; then
         warn "未检测到公网 IP, 无法生成分享链接"
-    fi
-
-    # 生成 Base64 订阅内容 (Shadowrocket 小火箭可直接导入)
-    echo -e "${GREEN}--- Shadowrocket (小火箭) 订阅 ---${RESET}"
-    SUB_CONTENT=""
-    [[ -n "$LINK_V4" ]] && SUB_CONTENT+="${LINK_V4}"$'\n'
-    [[ -n "$LINK_V6" ]] && SUB_CONTENT+="${LINK_V6}"$'\n'
-    if [[ -n "$SUB_CONTENT" ]]; then
-        SUB_BASE64=$(echo -n "$SUB_CONTENT" | base64 -w 0)
-        echo -e "${CYAN}Base64 订阅内容 (复制到小火箭订阅):${RESET}"
-        echo -e "${YELLOW}$SUB_BASE64${RESET}"
-        echo ""
-        echo -e "${CYAN}导入方式:${RESET}"
-        echo "  1) 直接复制上方分享链接 → 小火箭首页 + 号 → 粘贴"
-        echo "  2) 或复制 Base64 内容 → 小火箭 → 订阅 → 手动输入"
     fi
 
     echo ""
